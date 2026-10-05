@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PanelPreview from '../components/PanelPreview.vue'
-import { computeLed, ledRows } from '../logic/led'
+import { applyLedModuleSpec, computeLed, ledDensityGrade, ledRows } from '../logic/led'
 import { getProject } from '../logic/store'
 import { useSession } from '../logic/useSession'
 import type { Project } from '../logic/types'
@@ -23,15 +23,31 @@ const led = computed(() =>
 const rows = computed(() => (layout.value ? ledRows(layout.value.chars, project.value!.led) : []))
 const totalLumen = computed(() => (led.value ? led.value.modules * project.value!.led.moduleLumen : 0))
 
+const rowPerimeter = computed(() => Math.round(rows.value.reduce((s, r) => s + r.outerPerimeterMm, 0) * 10) / 10)
+const rowModules = computed(() => rows.value.reduce((s, r) => s + r.modules, 0))
+const rowRatedW = computed(() => Math.round(rows.value.reduce((s, r) => s + r.ratedW, 0) * 100) / 100)
+
+/** 当前选中的模组规格（用于取该规格的建议间距做密度提示） */
+const currentModule = computed(
+  () => preset.value.ledModules.find((m) => m.id === project.value?.ledModuleId) ?? null
+)
+
 function applyModule(id: string): void {
   if (!project.value) return
+  const mod = preset.value.ledModules.find((m) => m.id === id)
+  if (!mod) return
   project.value.ledModuleId = id
+  // 换规格：间距、单颗功率、亮度随规格一起带过去，再重算模组数/额定功率/密度
+  applyLedModuleSpec(project.value.led, mod)
 }
 
 const grade = computed(() => {
-  if (!led.value || !project.value) return ''
-  const spacing = project.value.led.moduleSpacingMm
-  return `模组间距 ${spacing}mm，布点密度合适`
+  if (!project.value || !layout.value || !led.value || led.value.modules === 0) return null
+  return ledDensityGrade(
+    project.value.led.moduleSpacingMm,
+    layout.value.sizeMm,
+    currentModule.value?.spacingMm ?? null
+  )
 })
 </script>
 
@@ -117,7 +133,7 @@ const grade = computed(() => {
               <span class="k">总光通量（估算）</span><span class="v">{{ totalLumen }} lm</span>
             </div>
             <div class="banner info" v-if="led">{{ led.note }}</div>
-            <div class="banner warn" v-if="grade">{{ grade }}</div>
+            <div class="banner" :class="grade && grade.level === 'ok' ? 'ok' : 'warn'" v-if="grade">{{ grade.text }}</div>
             <div class="banner warn" v-if="led && led.psuCount > 1">
               需 {{ led.psuCount }} 台电源：建议按字/按区分区供电，每区单独回路，避免长距离压降。
             </div>
@@ -141,7 +157,7 @@ const grade = computed(() => {
           <div class="card" style="margin-top: 14px">
             <header>
               <h2>逐字用量明细</h2>
-              <span class="hint">模块数按每个连通域外轮廓分别向上取整</span>
+              <span class="hint">周长按各字实际字号折算；逐字模组数按各字外轮廓分别向上取整</span>
             </header>
             <table>
               <thead>
@@ -164,16 +180,16 @@ const grade = computed(() => {
               </tbody>
               <tfoot>
                 <tr>
-                  <td>合计</td>
+                  <td>合计（逐字加总）</td>
                   <td class="num">{{ rows.reduce((s, r) => s + r.blocks, 0) }}</td>
-                  <td class="num">{{ led?.perimeterTotalMm ?? 0 }}</td>
-                  <td class="num">{{ rows.reduce((s, r) => s + r.modules, 0) }}</td>
-                  <td class="num">{{ rows.reduce((s, r) => s + r.ratedW, 0).toFixed(2) }}</td>
+                  <td class="num">{{ rowPerimeter }}</td>
+                  <td class="num">{{ rowModules }}</td>
+                  <td class="num">{{ rowRatedW.toFixed(2) }}</td>
                 </tr>
               </tfoot>
             </table>
             <p class="muted">
-              逐字模组数之和可能略大于整体向上取整值（整排按总长度一次取整更省料），报价以总长度计算为准。
+              逐字模组数按各字外轮廓分别向上取整，合计可能略大于整排按总长度一次取整的 {{ led?.modules ?? 0 }} 只（差额 {{ Math.max(0, rowModules - (led?.modules ?? 0)) }} 只）；材料与报价以整排总长度计算为准。
             </p>
           </div>
         </section>

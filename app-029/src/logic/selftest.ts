@@ -4,7 +4,7 @@
  */
 
 import testchars from '../data/testchars.json'
-import { computeLed } from './led'
+import { applyLedModuleSpec, computeLed, ledDensityGrade, ledDots, ledRows } from './led'
 import { clearGeometryCache, ensureFont, findFont, getGlyphGeom } from './fontLoader'
 import { computeLayout, defaultProject, textToItems, type LayoutResult } from './layout'
 import { assertBomSum, buildBom, compareMaterials, defaultPreset, type Preset } from './materials'
@@ -275,6 +275,93 @@ export async function runAcceptance(preset: Preset = defaultPreset): Promise<Acc
       pass: pass && noteOk,
       detail: pass && noteOk ? '通过' : '未通过',
       evidence: [...ev, `超档位提示：${big.note}`]
+    })
+  }
+
+  // ---------- 5b. 换规格联动 / 逐字用量折算 / 布点按间距 / 密度提示 ----------
+  {
+    const ev: string[] = []
+    const p = makeProject('acc5b', '广告一', 300)
+    const layout = computeLayout(p.layout)
+    const before = computeLed(layout.ledLengthMm, p.led, preset.psu)
+
+    // (1) 换模组规格：间距/单颗功率/亮度一起带过去，模组数与额定功率跟着重算
+    const mod144 = preset.ledModules.find((m) => m.id === 'led-12v-144-120')!
+    applyLedModuleSpec(p.led, mod144)
+    const after = computeLed(layout.ledLengthMm, p.led, preset.psu)
+    const specApplied =
+      p.led.moduleSpacingMm === mod144.spacingMm && p.led.modulePowerW === mod144.powerW && p.led.moduleLumen === mod144.lumen
+    const expectModules = Math.ceil(layout.ledLengthMm / mod144.spacingMm)
+    const expectRated = r2(expectModules * mod144.powerW * p.led.safetyFactor)
+    const switchOk = specApplied && after.modules === expectModules && near(after.ratedW, expectRated, 0.01)
+    ev.push(
+      `换为「${mod144.spec}」：间距→${p.led.moduleSpacingMm}mm、功率→${p.led.modulePowerW}W、亮度→${p.led.moduleLumen}lm；` +
+        `模组数 ${before.modules}→${after.modules}（期望 ceil(${r1(layout.ledLengthMm)}/${mod144.spacingMm})=${expectModules}），` +
+        `额定功率 ${before.ratedW}→${after.ratedW}W（期望 ${expectRated}W）${switchOk ? ' ✓' : ' ✗'}`
+    )
+
+    // (2) 逐字用量：周长按各字实际字号折算（不再是 1000em 本地值），与整排总长一致；
+    //     每行功率 = 该行模组数 × 单颗功率 × 安全系数，行功率之和不再远超总额定功率
+    const rows = ledRows(layout.chars, p.led)
+    const rowPerim = rows.reduce((s, x) => s + x.outerPerimeterMm, 0)
+    const rowP = rows.reduce((s, x) => s + x.ratedW, 0)
+    const perimOk = near(rowPerim, layout.ledLengthMm, 0.1 * rows.length + 0.5)
+    const powerOk = rows.every((x) => near(x.ratedW, r2(x.modules * p.led.modulePowerW * p.led.safetyFactor), 0.01))
+    const rowPowerOk = rowP <= after.ratedW + 0.01 || near(rowP, after.ratedW, 2) // 逐字分别取整时允许略大于整排值，但不再是数倍
+    ev.push(
+      `逐字周长合计 ${r1(rowPerim)}mm vs 整排总长 ${layout.ledLengthMm}mm（差 ${r1(Math.abs(rowPerim - layout.ledLengthMm))}mm）；` +
+        `逐字功率合计 ${r2(rowP)}W，整排额定 ${after.ratedW}W${perimOk && powerOk && rowPowerOk ? ' ✓' : ' ✗'}`
+    )
+
+    // (3) 布点按设定间距沿外轮廓均匀铺开
+    const dot120 = ledDots(layout.chars, 120)
+    const dot240 = ledDots(layout.chars, 240)
+    // 同「一」字（单环、笔画简单）上相邻点最近距离应 ≈ pitch，不允许挤成一团
+    const yi = layout.chars.find((c) => c.char === '一')
+    let uniformOk = false
+    let uniformDetail = '「一」字缺失'
+    if (yi) {
+      const ds = ledDots([yi], 20)
+      let nnMin = Infinity
+      let nnMax = 0
+      for (let i = 0; i < ds.length; i++) {
+        let dmin = Infinity
+        for (let j = 0; j < ds.length; j++) {
+          if (i === j) continue
+          const d = Math.hypot(ds[i].x - ds[j].x, ds[i].y - ds[j].y)
+          if (d < dmin) dmin = d
+        }
+        if (dmin < nnMin) nnMin = dmin
+        if (dmin > nnMax) nnMax = dmin
+      }
+      // pitch≈20mm 时最近邻应在 ~20mm 量级（容差到 12mm，排除顶点扎堆出现的个位数间距）
+      uniformOk = ds.length > 4 && nnMin >= 12
+      uniformDetail = `「一」字 @20mm 间距：${ds.length} 个点，相邻最近距离 min=${r1(nnMin)}mm / max=${r1(nnMax)}mm（期望 ≈20mm）`
+    }
+    // 调大间距点数应明显减少（证明疏密与间距相关）
+    const spacingOk = dot120.length > dot240.length
+    ev.push(
+      `布点数：间距 120mm → ${dot120.length} 点，240mm → ${dot240.length} 点（调大应变少）；${uniformDetail}` +
+        `${spacingOk && uniformOk ? ' ✓' : ' ✗'}`
+    )
+
+    // (4) 密度提示随字号/间距变化，不能恒为「合适」
+    const gBig = ledDensityGrade(120, 300, mod144.spacingMm) // 40% → 合适
+    const gSparse = ledDensityGrade(120, 100, mod144.spacingMm) // 120% → 偏稀
+    const gDense = ledDensityGrade(30, 300, mod144.spacingMm) // 10% → 偏密
+    const gradeOk =
+      !!gBig && gBig.level === 'ok' && !!gSparse && gSparse.level === 'sparse' && !!gDense && gDense.level === 'dense'
+    ev.push(
+      `密度提示：300mm 字号/120mm 间距=「${gBig?.level}」；100mm 字号/120mm=「${gSparse?.level}」；300mm 字号/30mm=「${gDense?.level}」${gradeOk ? ' ✓' : ' ✗'}`
+    )
+
+    const okAll = switchOk && perimOk && powerOk && rowPowerOk && spacingOk && uniformOk && gradeOk
+    checks.push({
+      id: 'A5b',
+      title: 'LED 联动：换规格带间距/功率/亮度并重算；逐字用量按实际字号折算且与整排一致；布点按间距沿轮廓均匀；密度提示随字号/间距变化',
+      pass: okAll,
+      detail: okAll ? '通过' : '未通过',
+      evidence: ev
     })
   }
 

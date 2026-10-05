@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env*
+*.log
+coverage/
+.DS_Store
+.vscode/
+.idea/
+
+# 客户报价单与门头照片
+quotes/
+clients/
+photos/
+exports/
+
+# selftest 临时打包产物（由 npm run selftest 生成）
+scripts/selftest.bundle.mjs
