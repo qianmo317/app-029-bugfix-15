@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PanelPreview from '../components/PanelPreview.vue'
 import { computeLed, ledRows } from '../logic/led'
+import { applyLedModule } from '../logic/materials'
 import { getProject } from '../logic/store'
 import { useSession } from '../logic/useSession'
 import type { Project } from '../logic/types'
@@ -20,18 +21,34 @@ const led = computed(() =>
     : null
 )
 
-const rows = computed(() => (layout.value ? ledRows(layout.value.chars, project.value!.led) : []))
+const rows = computed(() => (layout.value && project.value ? ledRows(layout.value.chars, project.value.led) : []))
 const totalLumen = computed(() => (led.value ? led.value.modules * project.value!.led.moduleLumen : 0))
 
 function applyModule(id: string): void {
   if (!project.value) return
+  const m = preset.value.ledModules.find((x) => x.id === id)
   project.value.ledModuleId = id
+  // 换规格：间距 / 单颗功率 / 亮度必须随规格一起带过去，重算模组数、额定功率与密度提示
+  if (m) project.value.led = applyLedModule(project.value.led, m)
 }
 
-const grade = computed(() => {
-  if (!led.value || !project.value) return ''
+/**
+ * 布点密度提示：间距要相对「实际排出来的字号」评估，
+ * 间距/字号太大则中间发暗（偏稀），太小则浪费且发热（偏密）。
+ * 改字号、改间距都会即时重判，而不是永远显示「合适」。
+ */
+const grade = computed<{ text: string; cls: string } | null>(() => {
+  if (!led.value || !project.value || !layout.value || led.value.modules === 0) return null
   const spacing = project.value.led.moduleSpacingMm
-  return `模组间距 ${spacing}mm，布点密度合适`
+  const size = layout.value.sizeMm
+  const ratio = spacing / Math.max(1, size)
+  if (ratio > 0.75) {
+    return { text: `模组间距 ${spacing}mm 相对字号 ${size}mm 偏大（比值 ${ratio.toFixed(2)}），布点偏稀，字心可能发暗，建议减小间距或换小间距规格`, cls: 'warn' }
+  }
+  if (ratio < 0.2) {
+    return { text: `模组间距 ${spacing}mm 相对字号 ${size}mm 偏小（比值 ${ratio.toFixed(2)}），布点偏密，浪费且易发热，建议加大间距`, cls: 'warn' }
+  }
+  return { text: `模组间距 ${spacing}mm / 字号 ${size}mm（比值 ${ratio.toFixed(2)}），布点密度合适`, cls: 'ok' }
 })
 </script>
 
@@ -117,7 +134,7 @@ const grade = computed(() => {
               <span class="k">总光通量（估算）</span><span class="v">{{ totalLumen }} lm</span>
             </div>
             <div class="banner info" v-if="led">{{ led.note }}</div>
-            <div class="banner warn" v-if="grade">{{ grade }}</div>
+            <div class="banner" :class="grade?.cls ?? 'warn'" v-if="grade">{{ grade.text }}</div>
             <div class="banner warn" v-if="led && led.psuCount > 1">
               需 {{ led.psuCount }} 台电源：建议按字/按区分区供电，每区单独回路，避免长距离压降。
             </div>
@@ -141,7 +158,7 @@ const grade = computed(() => {
           <div class="card" style="margin-top: 14px">
             <header>
               <h2>逐字用量明细</h2>
-              <span class="hint">模块数按每个连通域外轮廓分别向上取整</span>
+              <span class="hint">周长按各字实际字号折算；模组数按每字外轮廓分别向上取整</span>
             </header>
             <table>
               <thead>
@@ -173,7 +190,7 @@ const grade = computed(() => {
               </tfoot>
             </table>
             <p class="muted">
-              逐字模组数之和可能略大于整体向上取整值（整排按总长度一次取整更省料），报价以总长度计算为准。
+              各字周长按实际字号折算后列出，合计等于整排总布点长度。逐字模组数各自向上取整，之和可能略大于整排按总长一次取整的模组数（整排取整更省料），故逐字功率之和也可能略大于总额定功率；报价以总长度一次计算为准。
             </p>
           </div>
         </section>

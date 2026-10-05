@@ -6,7 +6,7 @@
  */
 
 import materialsData from '../data/materials.json'
-import type { LedResult, Material, Project } from './types'
+import type { LedCfg, LedResult, Material, Project } from './types'
 import type { LayoutResult, PlacedChar } from './layout'
 import { nestPieces, type CutItem, type NestingResult, type Piece } from './nesting'
 import { computeLed, type PsuPreset } from './led'
@@ -85,6 +85,20 @@ export interface Preset {
 }
 
 export const defaultPreset = materialsData as unknown as Preset
+
+/**
+ * 套用某个 LED 模组规格：切换规格时必须把该规格的间距、单颗功率、亮度
+ * 一起带到项目参数里，否则模组数 / 额定功率 / 密度提示仍按老规格算。
+ * 安全系数与电源效率属于安装配置，不随模组规格变化，保留项目现值。
+ */
+export function applyLedModule(cfg: LedCfg, module: LedModuleSpec): LedCfg {
+  return {
+    ...cfg,
+    moduleSpacingMm: module.spacingMm,
+    modulePowerW: module.powerW,
+    moduleLumen: module.lumen
+  }
+}
 
 export interface BomResult {
   materials: Material[]
